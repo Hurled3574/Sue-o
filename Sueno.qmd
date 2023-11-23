@@ -1,33 +1,246 @@
 ---
 title: "Sueño"
+author: "ASSANELLI Franco, KUZMINSKI Nicolás"
 format: html
 editor: visual
 ---
 
 ```{r}
 rm(list = ls())
+library(tidyverse)
 library(corrplot)
 library(wooldridge)
 library(FactoMineR)
-library(dplyr, pos = "package:base")
-sueno <- sleep75
+library(psych)
+library(factoextra)
+library(nortest)
 ```
 
+## Resumen
+
+En su artículo, Biddle y Hamermesh abordan el problema de la falta de datos salariales por hora para quienes no trabajan y la posible endogeneidad de la oferta salarial al incluir esta medida en la ecuación del sueño. Utilizando datos de 12 países, demuestran que el aumento del tiempo en el mercado laboral se relaciona con una reducción en el tiempo de sueño. Su teoría sugiere que el sueño afecta los salarios al influir en la productividad laboral. Las estimaciones muestran que salarios más altos reducen el tiempo de sueño entre hombres, mientras que aumentan el tiempo de vigilia fuera del mercado laboral en una cantidad igual. El efecto en mujeres es negativo pero pequeño. Fuente: J.E. Biddle y D.S. Hamermesh (1990), "Sleep and the Allocation of Time", Journal of Political Economy 98, 922-943.
+
+## Introducción
+
+Realizaremos un Análisis de Componentes Principales (PCA) para reducir la dimensionalidad de los datos con el objetivo de simplificar el análisis de los mismos y su interpretación, identificando patrones y resaltando las relaciones más importantes entre las variables.
+
+## Preparación de los Datos
+
+Tomamos el dataset sleep75 correspondiente hallado en la librería **wooldridge**.
+
 ```{r}
+sueno <- sleep75 
 glimpse(sueno)
 ```
 
-```{r}
-corrplot(cor(sueno))
-```
+Identificamos si hay registros duplicados:
 
 ```{r}
-princomp(sueno)
+anyDuplicated(sueno)
 ```
 
-
+Identificamos cuales variables contienen pocos valores (categorías) diferentes:
 
 ```{r}
-PCA(sueno)
+# columnas por cantidad de valores diferentes
+(col_categorias <- sapply(sueno, function(x) length(unique(x))))
 ```
 
+Vemos que hay variables lógicas con un cantidad incorrectas de 3 valores posibles:
+
+```{r}
+# listar valores de las columnas clerical y construc
+sueno |>  
+  group_by(clerical, construc) |> 
+  summarise(n = n(), .groups="keep")
+```
+
+Vemos que esos registros contienen otros valores extraños, como NAs en hrwage y lhrwage:
+
+```{r}
+sueno |> filter(!(clerical %in% c(0,1) | construc %in% c(0,1))) |> glimpse()
+```
+
+Decidimos descartar esos registros con varios valores extraños:
+
+```{r}
+# eliminar registros con valores extraños
+sueno <- sueno |> filter(clerical %in% c(0,1), construc %in% c(0,1))
+```
+
+Identificamos si quedan variables que contengan datos faltantes:
+
+```{r}
+# identificar cuantos datos NA hay por cada columna
+(col_faltantes <- colSums(is.na(sueno)))
+```
+
+Decidimos conservar las variables que contenga al menos 5 valores (o categorías) diferentes:
+
+```{r}
+# mantener las columnas con 5 o mas  categorias
+sueno <- sueno |>  select(names(col_categorias[col_categorias >= 5]))
+```
+
+Visualizamos la distribución de las variables restantes:
+
+```{r}
+# histograma de las variables
+sueno |> 
+  gather() |> 
+  ggplot(aes(value)) +
+  geom_histogram() +
+  facet_wrap(~key, scales = "free")
+```
+
+Eliminamos la columna identificadora **case**:
+
+```{r}
+# eliminamos la columna identificadora 
+sueno <- sueno |> select(-c(case))
+```
+
+Realizamos pruebas de normalidad de las variables (vemos que no se cumple en ninguna de ellas):
+
+```{r warning=FALSE}
+# Shapiro-Wilk
+sapply(sueno, function(x) shapiro.test(x)$p.value)
+
+# Anderson-Darling
+sapply(sueno, function(x) ad.test(x)$p.value)
+
+# Cramer-von Mises
+sapply(sueno, function(x) cvm.test(x)$p.value)
+
+# Lilliefors
+sapply(sueno, function(x) lillie.test(x)$p.value)
+
+# Kolmogorov-Smirnov
+sapply(sueno, function(x) ks.test(x, "pnorm")$p.value)
+```
+
+## Matriz de Correlaciones
+
+Buscamos y eliminamos correlaciones tan extremas que impiden cálculos posteriores, la mayoría son cálculos a partir de otras va
+
+-   leis1: sleep - totwrk
+-   leis2: slpnaps - totwrk
+-   leis3: rlxall - totwrk
+-   worknrm: mins work main job (con totwrk)
+-   exper: age - educ - 6
+-   agesq: age\^2
+
+```{r}
+sueno %>%
+  cor() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "variable") %>%
+  gather(key = "variable2", value = "correlacion", -variable) %>%
+  transmute(variables=paste(pmin(variable, variable2), "-", pmax(variable, variable2)), correlacion) %>%
+  distinct() %>%
+  filter(correlacion != 1) %>%
+  arrange(desc(correlacion)) %>%
+  head(10)
+
+sueno <- sueno |> select(-c(agesq,leis1,leis2,leis3,worknrm,exper))
+```
+
+Obtenemos la matriz de correlaciones y visualizamos:
+
+```{r}
+round(mcor <- cor(sueno), 2)
+corrplot(mcor)
+```
+
+## Medidas de Adecuación
+
+Vemos el determinante de la matriz de correlaciones es cercano a cero, lo que indica una alta correlación entre las variables.
+
+```{r}
+det(mcor)
+```
+
+La Prueba de Esfericidad de Bartlett, que al rechazar la hipótesis nula, indica que la matriz de correlaciones no es una matriz identidad. Es decir, que las variables están correlacionadas.
+
+```{r}
+bartlett.test(sueno)
+```
+
+El KMO con MSA mayor a 0.6 indica que el análisis de componentes principales es aceptable para estos datos. 
+
+```{r}
+KMO(sueno)
+```
+
+# Cálculo de autovalores y autovectores
+
+Obtenemos los autovectores y autovalores, los cuales determinan todos los componentes principales disponibles inicialmente. Se corresponden en cantidad con la de las variables analizadas.
+
+```{r}
+round(eigen(cor(mcor))$vectors, 3)
+round(eigen(cor(mcor))$values, 5)
+```
+
+Realizamos el análisis de componentes principales, según la librería FactoMineR:
+
+```{r}
+ACP <- PCA(sueno, scale.unit = T, ncp = 5, graph = F)
+summary(ACP)
+```
+
+Observamos la variancia explicada y acumulada por cada uno de los componentes principales:
+
+```{r}
+ACP$eig
+```
+
+Y la matriz de componentes, es decir las correlaciones entre las variables originales y los cinco componentes principales que explica la mayor varianza explicada:
+
+```{r}
+round(ACP$var$cor, 5)
+```
+
+Porcentualmente, la matriz de contribuciones a dichos componentes principales de cada una de las variables:
+
+```{r}
+round(addmargins(ACP$var$contrib, 1), 5)
+```
+
+Podemos observar que la primera dimensión se corresponde principalmente con variables relacionadas con el tiempo de descanso. La segunda dimensión se corresponde con variables relacionadas con los ingresos. La tercera dimensión se corresponde con variables relacionadas con la edad. La cuarta dimensión con la educación y el ingreso del conyuge, aunque también con la edad. La quinta dimensión también combina concepto heterogéneos y no resulta tan fácilmente interpretable.
+
+
+El gráfico de elbow (codo) nos permite observar la varianza explicada por cada uno de los componentes principales:
+
+```{r}
+fviz_screeplot(
+  ACP,
+  addlabels = TRUE,
+  main = "Porcentaje de varianza"
+)
+```
+
+No resulta en este caso tan claro el punto en el que se produce el codo, pero se puede observar que con 4 componentes se explica el 66% de la dispersión de los datos. Parece razonable en este caso restringirse a 3 o 4 dimensiones en términos de la interpretabilidad y la varianza explicada.
+
+
+El gráfico biplot de variables muestra el alineamiento de las variables en el plano de las dos primeras dimensiones donde se ve claramente las variables relacionadas al tiempo de descanso por un lado, y las de ingresos económicos por el otro:
+
+```{r}
+fviz_pca_var(ACP, col.var="cos2",gradient.cols = c("blue", "#E7B800", "red"),repel = TRUE)
+```
+
+
+Calculo de la matriz de puntuaciones
+
+Calculo de los componentes
+
+
+
+Con 10 componentes se explica el 71,6% de la dispersión
+
+# Matriz de componentes
+
+```{r}
+prcomp(sueno2)
+```
+
+La matriz de componentes presenta los coeficientes que se utilizan en las combinaciones lineales para la construcción de los componentes principales. Como la gráfica de sedimentación presenta hasta 10 componentes principales que explican el 71,6% de la dispersión de los datos, se consideran las primeras 10 columnas de coeficientes
